@@ -13,11 +13,14 @@ from utils import get_ego_pose  # utils.py에서 get_ego_pose 함수를 가져�
 from nuscenes.utils.geometry_utils import view_points
 
 class NuScenesViewer(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        
+    def __init__(self, version="v1.0-mini", dataroot="./v1.0-mini", parent=None):
+        #super().__init__()
+        super().__init__(parent)
+        self.version = version
+        self.dataroot = dataroot
+
         # NuScenes 객체 생성
-        self.nusc = NuScenes(version='v1.0-mini', dataroot='./v1.0-mini', verbose=True)
+        self.nusc = NuScenes(version=self.version, dataroot=self.dataroot, verbose=True)
         
         # 현재 씬과 샘플 토큰 초기화
         self.scenes = self.nusc.scene
@@ -231,22 +234,75 @@ class NuScenesViewer(QMainWindow):
             map_name = log['location']
             nusc_map = NuScenesMap(dataroot=self.nusc.dataroot, map_name=map_name)
 
-            layers = ['drivable_area', 'road_segment']
+            # 레이어 설정
+            layers = ['drivable_area', 'road_segment', 'lane', 'ped_crossing', 'stop_line']
+
+            # 레이어별 데이터 그리기
             for layer_name in layers:
-                records = getattr(nusc_map, layer_name)
+                records = getattr(nusc_map, layer_name, [])
                 for record in records:
-                    polygon_token = record.get('polygon_token')
+                    #if layer_name == 'stop_line':  # 정지선 처리
+                     #   line_token = record.get('line_token')
+                     #   print(f"Line Token: {line_token}")
+                     #   if line_token:
+                     #       line = nusc_map.extract_line(line_token)
+                     #       line_points = np.array(line.xy).T
+                     #       for i in range(len(line_points) - 1):
+                     #           x1, y1 = self.map_to_screen(line_points[i], width, height, ego_position)
+                     #           x2, y2 = self.map_to_screen(line_points[i + 1], width, height, ego_position)
+                     #           draw.line((x1, y1, x2, y2), fill=(255, 0, 0), width=2)  # 빨간색 정지선
+                    polygon_token = record.get('polygon_token')  # 폴리곤이 있는 레이어
                     if polygon_token:
+                    #else:
+                        polygon_token = record.get('polygon_token')  # 폴리곤이 있는 레이어
                         polygon = nusc_map.extract_polygon(polygon_token)
                         polygon_center = np.mean(np.array(polygon.exterior.xy), axis=1)
                         distance = np.linalg.norm(polygon_center[:2] - ego_position)
 
+                        # 범위 내의 폴리곤만 그리기
                         if distance <= 50:
                             points = np.array(polygon.exterior.xy).T
                             for i in range(len(points) - 1):
                                 x1, y1 = self.map_to_screen(points[i], width, height, ego_position)
                                 x2, y2 = self.map_to_screen(points[i + 1], width, height, ego_position)
-                                draw.line((x1, y1, x2, y2), fill=(200, 200, 200), width=2)
+
+                                # 레이어별 색상
+                                if layer_name == 'lane':
+                                    color = (255, 255, 0)  # 노란색
+                                elif layer_name == 'ped_crossing':
+                                    color = (255, 255, 255)  # 흰색
+                                elif layer_name == 'stop_line':
+                                    color = (255, 0, 255)  # 빨간색
+                                else:
+                                    color = (200, 200, 200)  # 기본 회색
+
+                                draw.line((x1, y1, x2, y2), fill=color, width=2)
+
+             # 신호등 표시
+            traffic_lights = nusc_map.traffic_light
+            for light in traffic_lights:
+                if 'position' in light:  # 'position' 키가 존재하는지 확인
+                    light_position = np.array(light['position'][:2])
+                    distance = np.linalg.norm(light_position - ego_position)
+
+                    # Ego Vehicle 주변 50m만 시각화
+                    if distance <= 50:
+                        x, y = self.map_to_screen(light_position, width, height, ego_position)
+                        draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill="red")
+
+            # Ego Vehicle 표시
+            ego_x, ego_y = self.map_to_screen(ego_position, width, height, ego_position)
+            ego_rect = [(-5, -2.5), (-5, 2.5), (5, 2.5), (5, -2.5)]
+            rotation_matrix = np.array([
+                [ego_rotation.rotation_matrix[0, 0], ego_rotation.rotation_matrix[0, 1]],
+                [-ego_rotation.rotation_matrix[1, 0], -ego_rotation.rotation_matrix[1, 1]]
+            ])
+            rotated_rect = [np.dot(rotation_matrix, point) * self.scale_factor + [ego_x, ego_y] for point in ego_rect]
+        
+            for i in range(4):
+                x1, y1 = rotated_rect[i]
+                x2, y2 = rotated_rect[(i + 1) % 4]
+                draw.line((x1, y1, x2, y2), fill="white", width=2)
 
             # 객체 색상 설정
             object_colors = {
@@ -274,17 +330,17 @@ class NuScenesViewer(QMainWindow):
                         x2, y2 = self.map_to_screen(corners_2d[i + 1], width, height, ego_position)
                         draw.line((x1, y1, x2, y2), fill=color, width=2)
 
-            ego_x, ego_y = self.map_to_screen(ego_position, width, height, ego_position)
-            ego_rect = [(-5, -2.5), (-5, 2.5), (5, 2.5), (5, -2.5)]
-            rotation_matrix = np.array([
-                [ego_rotation.rotation_matrix[0, 0], ego_rotation.rotation_matrix[0, 1]],
-                [-ego_rotation.rotation_matrix[1, 0], -ego_rotation.rotation_matrix[1, 1]]
-            ])
-            rotated_rect = [np.dot(rotation_matrix, point) * self.scale_factor + [ego_x, ego_y] for point in ego_rect]
-            for i in range(4):
-                x1, y1 = rotated_rect[i]
-                x2, y2 = rotated_rect[(i + 1) % 4]
-                draw.line((x1, y1, x2, y2), fill="white", width=2)
+            #ego_x, ego_y = self.map_to_screen(ego_position, width, height, ego_position)
+            #ego_rect = [(-5, -2.5), (-5, 2.5), (5, 2.5), (5, -2.5)]
+            #rotation_matrix = np.array([
+            #    [ego_rotation.rotation_matrix[0, 0], ego_rotation.rotation_matrix[0, 1]],
+            #    [-ego_rotation.rotation_matrix[1, 0], -ego_rotation.rotation_matrix[1, 1]]
+            #])
+            #rotated_rect = [np.dot(rotation_matrix, point) * self.scale_factor + [ego_x, ego_y] for point in ego_rect]
+            #for i in range(4):
+            #    x1, y1 = rotated_rect[i]
+            #    x2, y2 = rotated_rect[(i + 1) % 4]
+            #    draw.line((x1, y1, x2, y2), fill="white", width=2)
 
             # 이미지 변환 후 main viewer에 표시
             qt_img = self.pil2pixmap(img)
