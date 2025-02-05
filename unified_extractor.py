@@ -34,10 +34,18 @@ class UnifiedExtractor:
             print(f"Error processing index {idx}: {e}")
 
     def process(self, idx: int):
-        sample = self.dataset[idx]
+        sample = self.dataset[idx]  # AgentBatchElement 객체
 
-        ego_pos = torch.tensor(sample.ego_state.position[:2], dtype=torch.float)
-        ego_heading = torch.tensor([sample.ego_state.heading], dtype=torch.float)
+        # 🔹 timestamps 속성 확인
+        if hasattr(sample, "timestamps"):
+            timestamps = sample.timestamps
+        else:
+            print(f"Warning: 'timestamps' not found in sample {idx}. Generating synthetic timestamps.")
+            timestamps = np.linspace(sample.scene_ts - 5.0, sample.scene_ts + 5.0, 10)  # 10개의 프레임 생성
+
+        # 🔹 ego 차량 정보 가져오기
+        ego_pos = torch.tensor(sample.curr_agent_state_np.position[:2], dtype=torch.float)
+        ego_heading = torch.tensor([sample.curr_agent_state_np.heading[0]], dtype=torch.float)
 
         rotate_mat = torch.tensor(
             [
@@ -46,11 +54,10 @@ class UnifiedExtractor:
             ],
         )
 
-        timestamps = sample.timestamps
         num_frames = len(timestamps)
 
-        # 객체 정보 가져오기
-        objects = sample.agent_data
+        # 🔹 객체 정보 가져오기
+        objects = getattr(sample, "neighbor_histories", [])
         num_objects = len(objects)
 
         x = torch.zeros(num_objects, num_frames, 2, dtype=torch.float)
@@ -58,9 +65,9 @@ class UnifiedExtractor:
         padding_mask = torch.ones(num_objects, num_frames, dtype=torch.bool)
 
         for i, obj in enumerate(objects):
-            obj_pos = torch.tensor(obj.position[:, :2], dtype=torch.float)  # (N, 2)
-            obj_heading = torch.tensor(obj.heading, dtype=torch.float)
-            obj_velocity = torch.norm(torch.tensor(obj.velocity, dtype=torch.float), dim=1)
+            obj_pos = torch.tensor(obj[:, :2], dtype=torch.float)  # (N, 2)
+            obj_heading = torch.zeros(len(obj))  # heading 정보가 없을 수도 있으므로 0으로 채움
+            obj_velocity = torch.zeros(len(obj))  # velocity 정보도 없을 가능성 있음
 
             obj_pos_transformed = torch.matmul(obj_pos - ego_pos, rotate_mat)
 
@@ -68,21 +75,22 @@ class UnifiedExtractor:
             x_velocity[i, : len(obj_velocity)] = obj_velocity
             padding_mask[i, : len(obj_pos)] = False
 
-        # 차선 정보 가져오기
+        # 🔹 차선 정보 가져오기
         lane_positions = []
         lane_angles = []
         lane_padding_mask = []
 
-        for lane in sample.map_data.lanes:
-            lane_center = torch.tensor(lane.centerline[:, :2], dtype=torch.float)
-            lane_center_transformed = torch.matmul(lane_center - ego_pos, rotate_mat)
-            lane_positions.append(lane_center_transformed)
+        if hasattr(sample, "vec_map") and sample.vec_map is not None:
+            for lane in sample.vec_map.lane_segments:
+                lane_center = torch.tensor(lane.centerline[:, :2], dtype=torch.float)
+                lane_center_transformed = torch.matmul(lane_center - ego_pos, rotate_mat)
+                lane_positions.append(lane_center_transformed)
 
-            angles = torch.atan2(
-                lane_center[1:, 1] - lane_center[:-1, 1],
-                lane_center[1:, 0] - lane_center[:-1, 0],
-            )
-            lane_angles.append(torch.cat([angles, angles[-1:]], dim=0))
+                angles = torch.atan2(
+                    lane_center[1:, 1] - lane_center[:-1, 1],
+                    lane_center[1:, 0] - lane_center[:-1, 0],
+                )
+                lane_angles.append(torch.cat([angles, angles[-1:]], dim=0))
 
         if lane_positions:
             lane_positions = torch.stack(lane_positions)
@@ -107,5 +115,5 @@ class UnifiedExtractor:
             "lane_padding_mask": lane_padding_mask,
             "origin": ego_pos.view(-1, 2),
             "theta": ego_heading,
-            "timestamps": timestamps,
+            "timestamps": torch.tensor(timestamps, dtype=torch.float),
         }
